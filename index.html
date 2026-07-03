@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Data Redundancy Removal System</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="wrap">
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Redundancy Guard</h1>
+    </div>
+    <div class="stat">
+      <span id="totalCount">0</span>
+      <label>verified records</label>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="panel form-panel">
+      <h2>Submit new entry</h2>
+      <p class="hint">Every entry is checked against the database before it's stored. Exact matches are rejected. Near-matches are flagged for your confirmation.</p>
+
+      <form id="entryForm">
+        <label>Name<input type="text" id="name" required placeholder="e.g. Ayesha Khan"></label>
+        <label>Email<input type="email" id="email" required placeholder="e.g. ayesha@example.com"></label>
+        <label>Phone<input type="text" id="phone" placeholder="optional"></label>
+        <button type="submit" id="submitBtn">Check &amp; Add</button>
+      </form>
+
+      <div id="resultBox" class="result hidden"></div>
+    </section>
+
+    <section class="panel log-panel">
+      <div class="log-head">
+        <h2>Database log</h2>
+        <button id="refreshBtn" class="ghost">Refresh</button>
+      </div>
+      <table id="recordsTable">
+        <thead>
+          <tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Status</th><th>Added</th><th></th></tr>
+        </thead>
+        <tbody id="recordsBody"></tbody>
+      </table>
+      <p id="emptyState" class="empty hidden">No records yet — submit the first one on the left.</p>
+    </section>
+  </main>
+</div>
+
+<script>
+const form = document.getElementById('entryForm');
+const resultBox = document.getElementById('resultBox');
+const recordsBody = document.getElementById('recordsBody');
+const emptyState = document.getElementById('emptyState');
+const totalCount = document.getElementById('totalCount');
+
+let pendingForce = null; // holds payload if user needs to confirm a false-positive
+
+async function loadRecords() {
+  const res = await fetch('/api/records');
+  const rows = await res.json();
+  recordsBody.innerHTML = '';
+  emptyState.classList.toggle('hidden', rows.length > 0);
+  totalCount.textContent = rows.length;
+
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.id}</td>
+      <td>${escapeHtml(r.name)}</td>
+      <td>${escapeHtml(r.email)}</td>
+      <td>${escapeHtml(r.phone || '—')}</td>
+      <td><span class="badge ${r.status}">${r.status.replace(/_/g, ' ')}</span></td>
+      <td>${new Date(r.created_at).toLocaleString()}</td>
+      <td><button class="del" data-id="${r.id}">✕</button></td>
+    `;
+    recordsBody.appendChild(tr);
+  });
+
+  document.querySelectorAll('.del').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      await fetch(`/api/records/${e.target.dataset.id}`, { method: 'DELETE' });
+      loadRecords();
+    });
+  });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function showResult(kind, html) {
+  resultBox.className = `result ${kind}`;
+  resultBox.innerHTML = html;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('name').value.trim();
+  const email = document.getElementById('email').value.trim();
+  const phone = document.getElementById('phone').value.trim();
+
+  const payload = { name, email, phone };
+  if (pendingForce) payload.force = true;
+
+  const res = await fetch('/api/records', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json();
+
+  if (res.status === 201) {
+    showResult('ok', `✓ Inserted as <strong>${data.classification.replace(/_/g,' ')}</strong>. Database updated.`);
+    form.reset();
+    pendingForce = null;
+    loadRecords();
+    return;
+  }
+
+  if (data.reason === 'exact_duplicate') {
+    showResult('error', `✕ Rejected — this exact record already exists (ID ${data.existing_record.id}).`);
+    pendingForce = null;
+    return;
+  }
+
+  if (data.reason === 'false_positive') {
+    showResult('warn', `
+      ⚠ Looks similar to an existing record (ID ${data.similar_record.id}, ${escapeHtml(data.similar_record.name)} — similarity ${Math.round(data.similar_record.similarity*100)}%).
+      <br><button id="confirmForce" class="confirm-btn">Confirm it's actually unique &amp; add anyway</button>
+    `);
+    pendingForce = payload;
+    document.getElementById('confirmForce').addEventListener('click', () => form.requestSubmit());
+    return;
+  }
+
+  showResult('error', data.error || 'Something went wrong.');
+});
+
+document.getElementById('refreshBtn').addEventListener('click', loadRecords);
+loadRecords();
+</script>
+</body>
+</html>
